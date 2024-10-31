@@ -13,7 +13,7 @@ from src.Utils.Trainer import Trainer
 def parse_arguments():
 
     # Load JSON file that contains the parameters used for training
-    with open('Scripts/Config/train_config.json', 'r') as f:
+    with open('./Config/train_config.json', 'r') as f:
         file_args = json.load(f)
 
     # Initialize the argument parset
