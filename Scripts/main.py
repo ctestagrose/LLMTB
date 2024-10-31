@@ -29,6 +29,7 @@ def parse_arguments():
     parser.add_argument('--antibiotic', type=str, required=True, help='All, Rare only, or provide one antibiotic abbrev.')
     parser.add_argument('--save_path', type=str, required=True, help='Where to save model?')
     parser.add_argument('--use_holdout', action='store_true', help='Use a hold out test set?')
+    parser.add_argument('--use_gene_file', action='store_true', help='Use all the genes in a fasta or the gene file?')
     parser.add_argument('--gene_file', type=str, required=True, help='Path to the genes JSON file.')
     parser.add_argument('--target_file', type=str, required=True, help='Path to the targets file.')
 
@@ -38,6 +39,8 @@ def parse_arguments():
         if isinstance(value, bool):
             if key == "use_holdout" and value:
                 argument_list.append(f'--{key}')
+            elif key == "use_gene_file" and value:
+                argument_list.append(f'--{key}')
         else:
             argument_list.append(f'--{key}')
             argument_list.append(str(value))
@@ -45,8 +48,8 @@ def parse_arguments():
     # parse the "command-line" arguments
     args = parser.parse_args(argument_list)
 
-
     return args
+
 
 if __name__ == '__main__':
     

@@ -1,13 +1,14 @@
 {
-    "sequence_dir": "/home/conrad/Desktop/LLMTB/Data",
-    "gene_file": "/home/conrad/Desktop/LLMTB/Scripts/Config/Gene_Configs/genes_attention.json",
-    "target_file": "/home/conrad/Desktop/LLMTB/Data/cryptic_targets_all.json",
-    "num_epochs": 250,
+    "sequence_dir": "/path/to/fasta/sequences",
+    "gene_file": "/path/to/gene/config/file",
+    "target_file": "/path/to/labels/json",
+    "num_epochs": 100,
     "batch_size": 128,
     "stride": 20000,
     "Kmer_Size": 20000,
     "use_holdout": false,
-    "model_config": "/home/conrad/Desktop/LLMTB/Scripts/Config/Model_Configs/Base_BERT/base_config_binary.json",
+    "use_gene_file": true,
+    "model_config": "/path/to/model/config/file",
     "antibiotic": "All",
-    "save_path": "/home/conrad/Desktop/LLMTB/Trained_Models"
+    "save_path": "/location/to/save/model/files"
 }
