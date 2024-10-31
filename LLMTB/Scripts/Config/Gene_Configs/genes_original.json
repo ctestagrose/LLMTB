@@ -1,0 +1,16 @@
+{
+    "INH": ["katG"],
+    "ETH": ["ethA", "ethR", "fabG1", "inhA", "mshA", "Rv3083", "Rv0565c"],
+    "RIF": ["rpoA", "rpoB", "rpoC", "rpoZ", "Rv2752c"],
+    "RFB": ["rpoA", "rpoB", "rpoC", "rpoZ", "Rv2752c"],
+    "EMB": ["embA", "embB", "embC", "embR", "rmlD", "iniA", "iniC", "manB", "ubiA"],
+    "AMI": ["rrs", "eis", "ccsA", "whiB6", "whiB7", "aftB", "fprA"],
+    "KAN": ["rrs", "eis", "ccsA", "whiB6", "whiB7", "aftB", "fprA"],
+    "LEV": ["gyrA", "gyrB"],
+    "MXF": ["gyrA", "gyrB"],
+    "BDQ": ["atpE", "Rv0678", "mmpL5", "mmpS5", "pepQ", "Rv3249c"],
+    "CFZ": ["Rv1979c", "pepQ", "Rv0678", "mmpL5", "mmpS5", "Rv3249c"],
+    "LZD": ["rplC", "rrl", "Rv3249c"],
+    "DLM": ["ddn", "fgd1", "fbiA", "fbiB", "fbiC", "fbiD", "Rv3249c"],
+    "multi_cat": ["gyrA", "gyrB"]
+}
