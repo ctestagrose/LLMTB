@@ -50,7 +50,8 @@ class DataPreparer:
                 target_format = self.args.antibiotic
             if isolate in targets:
                 if target_format == 'multi-cat':
-                    ordering = ["AMI", "INH", "RIF", "LEV", "ETH", "EMB", "RFB", "MXF", "KAN"]
+                    ordering = ["AMI", "INH", "RIF", "LEV", "ETH",
+                                "EMB", "RFB", "MXF", "KAN"]
                     # Handle multi-category labels
                     label_dict = targets[isolate]
                     label = []
@@ -64,7 +65,9 @@ class DataPreparer:
                     for item in ordering:
                         label.append(label_dict[item])
                 elif target_format == 'multi-cat all':
-                    ordering = ["AMI", "INH", "RIF", "LEV", "ETH", "EMB", "RFB", "MXF", "KAN", "LZD", "BDQ", "DLM", "CFZ"]
+                    ordering = ["AMI", "INH", "RIF", "LEV", "ETH",
+                                "EMB", "RFB", "MXF", "KAN", "LZD",
+                                "BDQ", "DLM", "CFZ"]
                     # Handle multi-category labels
                     label_dict = targets[isolate]
                     label = []
@@ -75,12 +78,18 @@ class DataPreparer:
                     label = targets[isolate][target_format]
                 
                 # Check for valid labels (ignoring isolates with NaN values in any label)
-                if ('multi-cat' in target_format and not any(math.isnan(x) for x in label)) or ('multi-cat' not in target_format and not math.isnan(label)):
+                if (('multi-cat' in target_format and not any(math.isnan(x) for x in label)) or
+                        ('multi-cat' not in target_format and not math.isnan(label))):
                     if "Merged" or "10_23" in self.args.sequence_dir:
-                        clean_sequence, genes_in_isolate = self.gene_manager.read_fasta_file_genes_all(fasta_file, target_format)
-                        # clean_sequence, genes_in_isolate = self.gene_manager.read_fasta_file_genes(fasta_file, target_format)
+                        if self.args.use_gene_file:
+                            clean_sequence, genes_in_isolate = self.gene_manager.read_fasta_file_genes(fasta_file,
+                                                                                                       target_format)
+                        else:
+                            clean_sequence, genes_in_isolate = self.gene_manager.read_fasta_file_genes_all(
+                                fasta_file, target_format)
                     else:
-                        clean_sequence, genes_in_isolate = self.gene_manager.read_fasta_file_genes(fasta_file, target_format)
+                        clean_sequence, genes_in_isolate = self.gene_manager.read_fasta_file_genes(fasta_file,
+                                                                                                   target_format)
         
                     # If there is a sequence, append; else, print no valid sequences
                     if clean_sequence:
