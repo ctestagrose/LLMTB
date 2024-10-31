@@ -1,0 +1,50 @@
+{
+  "vocab_size": 30522,
+  "hidden_dim": [
+    384,  
+    768,  
+    512   
+  ],
+  "num_heads": [
+    6,    
+    8,    
+    8    
+  ],
+  "ff_dim": [
+    1536, 
+    1024, 
+    2048  
+  ],
+  "num_blocks": [
+    6,    
+    8,    
+    5     
+  ],
+  "block_size": [
+    32,   
+    64,   
+    32    
+  ],
+  "num_layers": [
+    6,    
+    10,    
+    7     
+  ],
+  "num_class": [
+    13,
+    13,
+    13
+  ],
+  "dropout": [
+    0.30,
+    0.20,
+    0.50
+  ],
+  "include_adjacent": [
+    true,
+    true,
+    true
+  ],
+  "learning_rate": 2e-04,
+  "model_type": "ensemble"
+}

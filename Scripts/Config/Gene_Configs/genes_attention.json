@@ -1,0 +1,12 @@
+{
+    "AMI": ["guaa", "rrs", "gyra", "glne", "glpx", "gid", "embb", "rv1765c", "rv1979c", "rv0061c", "rrl", "rv0078a", "glpk", "gap", "etha", "katg", "gyrb", "eis", "fas", "glga", "mce2f", "rv1565c", "rv2219a", "rv1371", "rv1752", "rv1393c", "mets", "pnca", "rv1830", "rv0376c", "rv1772", "rv1897c", "rv1995", "rv1896c"],
+    "INH": ["gid", "glne", "gyra", "katg", "kasa", "guaa", "kdpd", "inia", "pnca", "embb", "rpsl", "lipo", "inic", "glpk", "inha", "gadb", "rv1896c", "lprc", "gap", "glga", "gyrb", "rpob"],
+    "RIF": ["obg", "ubia", "cut1", "mmaa2", "rv1158c", "moac3", "rv0228", "recc", "rpob", "rrl", "rv2797c", "rv3603c", "deoa", "rne", "rv2752c", "pks1", "ctpa", "rv0565c", "rv1508c", "gyra", "amia2", "cbs", "rv0207c", "gid", "inic", "pe_pgrs22", "rv1765c", "mmaa4", "mmpl1", "mmpl8", "mura", "pknb", "mce2f", "ppe39", "viub"],
+    "LEV": ["katg", "guaa", "gyra", "gyrb", "etha", "glne", "glpk", "glpx", "embb", "inha", "pnca", "inia", "fbic", "kdpd", "gid", "glga", "kasa"],
+    "ETH": ["etha", "gyra", "fabg1", "gid", "fadb4", "pnca", "rpob", "rpoc", "glne", "ethr", "gyrb", "inha", "fadd1", "folc", "fas", "rv1897c", "rpoa", "rv1896c", "rv1765c", "rrs", "glpx", "guaa", "glpk", "glga", "embb", "emba", "epha", "embc", "fbic", "katg", "gap", "ftsk", "fba"],
+    "EMB": ["embb", "pnca", "katg", "gyra", "emba", "kdpd", "rpob", "rpoc", "rpsl", "embc", "gid", "etha", "guaa", "inic", "kasa", "rpoa", "rpoz", "glpx", "glpk", "glne", "gyrb", "rv1896c", "rv2019", "inha", "rrs"],
+    "RFB": ["katg", "rpob", "rpoc", "kasa", "pnca", "rpoa", "embb", "kdpd", "embc", "gyra", "inic", "lipo", "guaa", "inia", "rv2348c", "pe_pgrs48", "ppe3", "pe_pgrs13", "gadb", "gid", "emba", "rpoz", "rpsa", "recc"],
+    "MXF": ["gyra", "gyrb", "guaa", "glpx", "glpk", "inia", "inha", "katg", "embb", "etha", "pnca", "rv2019", "gid", "rv1896c", "glga", "fpra", "rpob", "kasa", "kdpd", "inic"],
+    "KAN": ["rrs", "rpob", "rpoc", "eis", "embb", "rv0061c", "rpsl", "rpsa", "rrl", "katg", "etha", "glga", "emba", "fabg1", "gyra", "gyrb", "obg", "pnca", "rpoz", "gid", "glpk", "rv2019", "rv1897c", "rpoa", "ftsk", "rv0095c", "embc", "embr"],
+    "LZD": ["glne", "guaa", "gyra", "gid", "gap", "ftsk", "rpob", "glpk", "rv1896c", "glga", "rv1979c", "rv2019", "rv1830", "etha", "gadb", "fpra", "rv1371", "gyrb", "rplc", "rpsl", "rv0095c", "mmpl5", "mce2f", "rpoc", "rpsa", "rrl", "rv1765c", "rv1565c", "rv1429", "rv1752", "glpx", "inia"]
+}

@@ -1,0 +1,14 @@
+{
+    "vocab_size": 5000,
+    "hidden_dim": 1024,
+    "num_heads": 16,
+    "ff_dim": 4096,
+    "num_blocks": 10,
+    "block_size": 64,
+    "num_layers": 12,
+    "num_class": 1,
+    "dropout": 0.25,
+    "include_adjacent": true,
+    "learning_rate": 2e-05,
+    "model_type": "single"
+}
