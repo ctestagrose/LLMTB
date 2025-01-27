@@ -9,6 +9,5 @@
     "num_class":1,
     "dropout": 0.50, 
     "include_adjacent": true,
-    "learning_rate": 2e-04,
-    "model_type": "single"
+    "learning_rate": 2e-04
 }

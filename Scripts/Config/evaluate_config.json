@@ -1,15 +1,14 @@
 {
-    "sequence_dir": "/blue/boucher/share/MTB_LLM/AMR_Merged_Genes_Other_Half",
-    "gene_file": "./Parameters/genes_who_determined.json",
-    "target_file": "/blue/boucher/share/MTB_LLM/LLMTB/Data/cryptic_targets_all.json",
-    "num_epochs": 100,
-    "batch_size": 64,
-    "stride": 10000,
-    "Kmer_Size": 10000,
+    "sequence_dir": "/path/to/fasta/sequences",
+    "gene_file": "/path/to/gene/config/file",
+    "target_file": "/path/to/labels/json",
+    "num_epochs": 200,
+    "batch_size": 256,
+    "stride": 20000,
+    "Kmer_Size": 20000,
     "use_holdout": false,
-    "model_config": "/blue/boucher/share/MTB_LLM/LLMTB/Scripts/Model_Configs/base_config_binary.json",
-    "antibiotic": "Multi-Cat Rare",
-    "save_path": "/blue/boucher/share/MTB_LLM/LLMTB/Trained_Models/TESTING_DEBUG",
-    "generated_file_path": "/blue/boucher/share/MTB_LLM/LLMTB/Data/GAN_Generated_3",
-    "use_gen": false
+    "use_gene_file": true,
+    "model_config": "/path/to/model/config/file",
+    "antibiotic": "All",
+    "save_path": "/location/to/save/model/files"
 }

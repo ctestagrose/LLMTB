@@ -1,5 +1,6 @@
 import json
 import math
+from tqdm import tqdm
 
 class DataPreparer:
     def __init__(self, gene_manager, sequence_processor, tokenizer_manager, args):
@@ -35,31 +36,29 @@ class DataPreparer:
                     unsplit_dict[item] = targets[item]
             
             targets = split_dict
-            # targets = unsplit_dict
 
         # Keep Track of resistant and susceptible for debugging purposes
         susceptible = 0
         resistant = 0
 
         # Iterate through the fasta files
-        for fasta_file in fasta_files:
+        for fasta_file in tqdm(fasta_files, desc=f"Processing FASTA files for {target_format}...", unit="files"):
             # Get isolate number
             isolate = fasta_file.split("/")[-1].split(".")[0]
             if "_" in isolate:
                 isolate = isolate.split("_")[0]
                 target_format = self.args.antibiotic
             if isolate in targets:
+                # Handle multi-category labels
                 if target_format == 'multi-cat':
                     ordering = ["AMI", "INH", "RIF", "LEV", "ETH",
                                 "EMB", "RFB", "MXF", "KAN"]
-                    # Handle multi-category labels
                     label_dict = targets[isolate]
                     label = []
                     for item in ordering:
                         label.append(label_dict[item])
                 elif target_format == 'multi-cat rare':
                     ordering = ["LZD", "BDQ", "DLM", "CFZ"]
-                    # Handle multi-category labels
                     label_dict = targets[isolate]
                     label = []
                     for item in ordering:
@@ -68,7 +67,6 @@ class DataPreparer:
                     ordering = ["AMI", "INH", "RIF", "LEV", "ETH",
                                 "EMB", "RFB", "MXF", "KAN", "LZD",
                                 "BDQ", "DLM", "CFZ"]
-                    # Handle multi-category labels
                     label_dict = targets[isolate]
                     label = []
                     for item in ordering:
@@ -80,15 +78,7 @@ class DataPreparer:
                 # Check for valid labels (ignoring isolates with NaN values in any label)
                 if (('multi-cat' in target_format and not any(math.isnan(x) for x in label)) or
                         ('multi-cat' not in target_format and not math.isnan(label))):
-                    if "Merged" or "10_23" in self.args.sequence_dir:
-                        if self.args.use_gene_file:
-                            clean_sequence, genes_in_isolate = self.gene_manager.read_fasta_file_genes(fasta_file,
-                                                                                                       target_format)
-                        else:
-                            clean_sequence, genes_in_isolate = self.gene_manager.read_fasta_file_genes_all(
-                                fasta_file, target_format)
-                    else:
-                        clean_sequence, genes_in_isolate = self.gene_manager.read_fasta_file_genes(fasta_file,
+                    clean_sequence, genes_in_isolate = self.gene_manager.read_fasta_file_genes(fasta_file,
                                                                                                    target_format)
         
                     # If there is a sequence, append; else, print no valid sequences

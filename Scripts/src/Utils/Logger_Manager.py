@@ -1,7 +1,6 @@
 import logging
 import os
 
-
 class LoggerManager:
     def __init__(self, antibiotic, fold, save_path, train=True):
         self.logger = logging.getLogger(f'{antibiotic}_fold_{fold}')

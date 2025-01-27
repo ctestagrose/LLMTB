@@ -1,27 +1,26 @@
-
 import json
 import os
 import gc
 import torch
 import numpy as np
-from torch import nn
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from functools import partial
 from collections import Counter, defaultdict
 from .Logger_Manager import LoggerManager
 from .Metric_Calculator import MetricsCalculator
 from .Model_Manager import ModelManager
 from .Dataset import SeqDataset, collate_fn
-from .Loss_Functions import CombinedFocalLabelSmoothingLoss
+from .Loss_Functions import (CombinedFocalLabelSmoothingLoss,
+                             CombinedFocalLabelSmoothingLossMultiCat)
+from .Evaluater import Evaluater
+from torch.optim import AdamW
+import torch.distributed as dist
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 import torch.multiprocessing as mp
-import torch.distributed as dist
 from torch.utils.data import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
-from sklearn.model_selection import StratifiedKFold, KFold, train_test_split
-from torch.cuda.amp import autocast, GradScaler
-import random
-from functools import partial
+from torch.amp import autocast, GradScaler
+from sklearn.model_selection import ShuffleSplit, StratifiedShuffleSplit, train_test_split
 
 
 class Trainer:
@@ -31,190 +30,91 @@ class Trainer:
         self.tokenizer_manager = tokenizer_manager
         self.gene_manager = gene_manager
 
-    def train(self, zipped_data, mode):
-        args = self.args
-        sequence_processor = self.sequence_processor
-        tokenizer_manager = self.tokenizer_manager
+    def setup_and_run(self, rank, world_size, train_dataset, val_dataset, batch_size, tokenizer, *args):
+        master_addr = os.environ.get('MASTER_ADDR', '127.0.0.1')
+        master_port = os.environ.get('MASTER_PORT', '8989')
 
-        save_path = os.path.join(args.save_path, args.antibiotic)
-        os.makedirs(save_path, exist_ok=True)
+        os.environ['MASTER_ADDR'] = master_addr
+        os.environ['MASTER_PORT'] = master_port
 
-        target_format = "binary" if "multi-cat" not in args.antibiotic else "multi-cat"
+        if not dist.is_initialized():
+            dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
 
-        if args.use_holdout:
-            labels = [label for _, label, _, _ in zipped_data]
-            if target_format != "multi-cat":
-                train_val_data, test_data = train_test_split(zipped_data, test_size=0.15, stratify=labels, random_state=42)
-            else:
-                train_val_data, test_data = train_test_split(zipped_data, test_size=0.15, random_state=42)
-            test_seq_ids = [seq_id for _, _, seq_id, _ in test_data]
+        torch.cuda.set_device(rank)
 
-            with open(os.path.join(save_path, 'test_seq_ids.json'), 'w') as f:
-                json.dump(test_seq_ids, f, indent=3)
-        else:
-            train_val_data = zipped_data
+        train_sampler = DistributedSampler(train_dataset, rank=rank, num_replicas=world_size, shuffle=True)
+        val_sampler = DistributedSampler(val_dataset, rank=rank, num_replicas=world_size, shuffle=False)
 
-        include_val_in_tokenizer = True
+        collate_fn_partial = partial(collate_fn, classification_type=args[3],
+                                     MASK_TOKEN=tokenizer.token_to_id("[MASK]"),
+                                     PAD_TOKEN=tokenizer.token_to_id("[PAD]"),
+                                     VOCAB_SIZE=self.tokenizer_manager.vocab_size)
 
-        labels = [label for _, label, _, _ in train_val_data]
+        num_cpus = torch.get_num_threads()
 
-        if include_val_in_tokenizer:
-            sequences = [seq for seq, _, _, _ in train_val_data]
-            labels = [label for _, label, _, _ in train_val_data]
-            seq_ids = [seq_id for _, _, seq_id, _ in train_val_data]
-            genes_list = [genes for _, _, _, genes in train_val_data]
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_fn_partial,
+            num_workers=num_cpus,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2,
+            sampler=train_sampler,
+        )
 
-            unique_n_mers, prepped_seqs, prepped_labels = sequence_processor.extract_and_prep_genes(sequences, labels)
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_fn_partial,
+            num_workers=num_cpus,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2,
+            sampler=val_sampler,
+        )
 
-            if mode == "Evaluate":
-                tokenizer_path = f"{args.save_path}/{args.antibiotic}/tokenizer.json"
-                print(tokenizer_path)
-                tokenizer = tokenizer_manager.load_kmer_tokenizer(tokenizer_path)
-            else:
-                tokenizer = tokenizer_manager.setup_kmer_tokenizer(prepped_seqs, unique_n_mers)
-                tokenizer_manager.save_tokenizer(tokenizer, f"{args.save_path}/{args.antibiotic}/tokenizer.json")
-
-            train_val_data = self.tokenize_sets(prepped_seqs, prepped_labels, seq_ids, genes_list, tokenizer, args, 0)
-
-            vocab_size = len(unique_n_mers) + 1
-            batch_size = int(args.batch_size)
-            config = json.load(open(args.model_config))
-            print(f"Vocab Size: {vocab_size}")
-            print(train_val_data[0])
-
-        folds = self.create_folds(train_val_data, labels, target_format)
-
-        for fold, (train_fold, val_fold) in enumerate(folds):
-            if not include_val_in_tokenizer:
-                # Handle tokenization without including validation data
-                sequences, sequences_val = [seq for seq, _, _, _ in train_fold], [seq for seq, _, _, _ in val_fold]
-                labels, labels_val = [label for _, label, _, _ in train_fold], [label for _, label, _, _ in val_fold]
-                seq_ids, seq_ids_val = [seq_id for _, _, seq_id, _ in train_fold], [seq_id for _, _, seq_id, _ in val_fold]
-                genes_list, genes_list_val = [genes for _, _, _, genes in train_fold], [genes for _, _, _, genes in val_fold]
-
-                unique_n_mers, prepped_seqs, prepped_labels = sequence_processor.extract_and_prep_genes(sequences, labels)
-                unique_n_mers_val, prepped_seqs_val, prepped_labels_val = sequence_processor.extract_and_prep_genes(sequences_val, labels_val)
-
-                if mode == "Evaluate":
-                    tokenizer_path = f"{args.save_path}/{args.antibiotic}/tokenizer_{fold+1}.json"
-                    print(tokenizer_path)
-                    tokenizer = tokenizer_manager.load_kmer_tokenizer(tokenizer_path)
-                else:
-                    tokenizer = tokenizer_manager.setup_kmer_tokenizer(prepped_seqs, unique_n_mers)
-                    tokenizer_manager.save_tokenizer(tokenizer, f"{args.save_path}/{args.antibiotic}/tokenizer_{fold+1}.json")
-
-                train_fold = self.tokenize_sets(prepped_seqs, prepped_labels, seq_ids, genes_list, tokenizer, args, fold)
-                val_fold = self.tokenize_sets(prepped_seqs_val, prepped_labels_val, seq_ids_val, genes_list_val, tokenizer, args, fold)
-
-                vocab_size = len(unique_n_mers) + 1
-                batch_size = int(args.batch_size)
-                config = json.load(open(args.model_config))
-
-            model_manager = ModelManager(vocab_size, config)
-            optimizer = AdamW(model_manager.model.parameters(), lr=config["learning_rate"], weight_decay=1e-6)
-            scheduler = CosineAnnealingLR(optimizer, T_max=25, eta_min=1e-8)
-            metrics_calculator = MetricsCalculator()
-
-            # Save the isolate numbers for each set for reproduction purposes
-            train_seq_ids = [seq_id for _, _, seq_id in train_fold]
-            val_seq_ids = [seq_id for _, _, seq_id in val_fold]
-            with open(os.path.join(save_path, f'train_seq_ids_fold_{fold + 1}.json'), 'w') as f:
-                json.dump(train_seq_ids, f, indent=3)
-            with open(os.path.join(save_path, f'val_seq_ids_fold_{fold + 1}.json'), 'w') as f:
-                json.dump(val_seq_ids, f, indent=3)
-
-            oversampled_train_data = self.oversample_minority_class(train_fold)
-            label_for_weighting = [label for _, label, _ in oversampled_train_data]
-            train_dataset = self.create_dataset(oversampled_train_data, target_format)
-            val_dataset = self.create_dataset(val_fold, target_format)
-
-            world_size = torch.cuda.device_count()
-
-            args_l = (
-                train_dataset,
-                val_dataset,
-                batch_size,
-                save_path,
-                target_format,
-                fold,
-                label_for_weighting,
-                args.num_epochs,
-                model_manager,
-                optimizer,
-                scheduler,
-                metrics_calculator,
-                args,
-            )
-
-            mp.spawn(
-                self.setup_and_run,
-                args=(world_size, *args_l),
-                nprocs=world_size,
-                join=True,
-            )
-
-            if args.use_holdout:
-                sequences_te = [seq for seq, _, _, _ in test_data]
-                labels_te = [label for _, label, _, _ in test_data]
-                seq_ids_te = [seq_id for _, _, seq_id, _ in test_data]
-                genes_list_te = [genes for _, _, _, genes in test_data]
-
-                unique_n_mers_te, prepped_seqs_te, prepped_labels_te = sequence_processor.extract_and_prep_genes(
-                    sequences_te, labels_te
-                )
-
-                test_data_prepped = self.tokenize_sets(
-                    prepped_seqs_te,
-                    prepped_labels_te,
-                    seq_ids_te,
-                    genes_list_te,
-                    tokenizer,
-                    args,
-                    fold,
-                )
-
-                test_dataset = self.create_dataset(test_data_prepped, target_format)
-
-                test_loader = DataLoader(
-                    test_dataset,
-                    batch_size=batch_size,
-                    shuffle=False,
-                    collate_fn=lambda batch: collate_fn(batch, classification_type=target_format),
-                    num_workers=0,
-                    pin_memory=True,
-                )
-                self.evaluate(
-                    test_loader,
-                    os.path.join(save_path, f"best_model_fold_{fold + 1}.pth"),
-                    target_format,
-                    metrics_calculator,
-                    model_manager,
-                    args,
-                    fold,
-                )
-
-            gc.collect()
-            torch.cuda.empty_cache()
+        self._train_model(rank, world_size, train_loader, val_loader, *args)
 
     def tokenize_sets(self, prepped_seqs, prepped_labels, seq_ids, genes_list, tokenizer, args, fold):
         encoded_sequences = []
         gene_mapping = {}
+        token_to_gene = {}  # Add reverse mapping
+
         for index, sequence in enumerate(prepped_seqs):
-            encoded_sequence = self.tokenizer_manager.bpe_encode_sequences_genes(sequence, tokenizer)
+            encoded_sequence = self.tokenizer_manager.encode_sequences_genes(sequence, tokenizer)
             combined_list = [item for sublist in encoded_sequence for item in sublist]
             encoded_sequences.append([combined_list])
             genes_in_this_isolate = genes_list[index]
+
             for token, gene in zip(encoded_sequence, genes_in_this_isolate):
+                token_id = token[0]
+                if token_id == 0:
+                    continue
+
                 if gene not in gene_mapping:
                     gene_mapping[gene] = []
-                if token[0] not in gene_mapping[gene]:
-                    gene_mapping[gene].append(token[0])
-        with open(f"{args.save_path}/{args.antibiotic}/Gene_to_Token_{fold+1}.json", "w") as j:
-            json.dump(gene_mapping, j, indent=3)
+                if token_id not in gene_mapping[gene]:
+                    gene_mapping[gene].append(token_id)
 
-        zipped_data = list(zip(encoded_sequences, prepped_labels, seq_ids))
+                token_to_gene[token_id] = {
+                    'gene': gene,
+                    'is_intergenic': gene.endswith('_ir_before') or gene.endswith('_ir_after')
+                }
 
-        return zipped_data
+        mappings = {
+            'gene_to_token': gene_mapping,
+            'token_to_gene': token_to_gene
+        }
+
+        with open(f"{args.save_path}/{args.antibiotic}/Gene_Token_Mapping.json", "w") as j:
+            json.dump(mappings, j, indent=3)
+        # with open(f"{args.save_path}/{args.antibiotic}/Gene_Token_Mapping_{fold+1}.json", "w") as j:
+        #     json.dump(mappings, j, indent=3)
+
+        return list(zip(encoded_sequences, prepped_labels, seq_ids))
 
     def create_dataset(self, zipped_data, classification_type):
         seqs_ = []
@@ -240,187 +140,37 @@ class Trainer:
         oversampled_minority_samples += minority_samples[:remaining]
 
         oversampled_dataset = majority_samples + oversampled_minority_samples
-        random.shuffle(oversampled_dataset)
-
         return oversampled_dataset
 
-    def create_folds(self, train_val_data, labels, target_format, n_splits=5, seed=42):
+    def create_folds(self, train_val_data, labels, target_format, n_splits=5, val_size=0.2, seed=42):
         folds = []
 
-        if target_format == "multi-cat":
-            kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
-            for train_idx, val_idx in kf.split(train_val_data):
-                train_fold = [train_val_data[i] for i in train_idx]
-                val_fold = [train_val_data[i] for i in val_idx]
-                folds.append((train_fold, val_fold))
+        if n_splits == 1:
+            if target_format == "multi-cat":
+                train_data, val_data = train_test_split(train_val_data,
+                                                        test_size=val_size,
+                                                        random_state=seed)
+            else:
+                train_data, val_data = train_test_split(train_val_data,
+                                                        test_size=val_size,
+                                                        stratify=labels,
+                                                        random_state=seed)
+            folds.append((train_data, val_data))
         else:
-            skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-            for train_idx, val_idx in skf.split(train_val_data, labels):
-                train_fold = [train_val_data[i] for i in train_idx]
-                val_fold = [train_val_data[i] for i in val_idx]
-                folds.append((train_fold, val_fold))
+            if target_format == "multi-cat":
+                splitter = ShuffleSplit(n_splits=n_splits, test_size=val_size, random_state=seed)
+                for train_idx, val_idx in splitter.split(train_val_data):
+                    train_fold = [train_val_data[i] for i in train_idx]
+                    val_fold = [train_val_data[i] for i in val_idx]
+                    folds.append((train_fold, val_fold))
+            else:
+                splitter = StratifiedShuffleSplit(n_splits=n_splits, test_size=val_size, random_state=seed)
+                for train_idx, val_idx in splitter.split(train_val_data, labels):
+                    train_fold = [train_val_data[i] for i in train_idx]
+                    val_fold = [train_val_data[i] for i in val_idx]
+                    folds.append((train_fold, val_fold))
 
         return folds
-
-    def setup_and_run(self, rank, world_size, train_dataset, val_dataset, batch_size, *args):
-        master_addr = os.environ.get('MASTER_ADDR', '127.0.0.1')
-        master_port = os.environ.get('MASTER_PORT', '8989')
-
-        os.environ['MASTER_ADDR'] = master_addr
-        os.environ['MASTER_PORT'] = master_port
-
-        if not dist.is_initialized():
-            dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
-
-        torch.cuda.set_device(rank)
-        device = torch.device(f'cuda:{rank}')
-
-        train_sampler = DistributedSampler(train_dataset, rank=rank, num_replicas=world_size, shuffle=True)
-        val_sampler = DistributedSampler(val_dataset, rank=rank, num_replicas=world_size, shuffle=False)
-
-        collate_fn_partial = partial(collate_fn, classification_type=args[3])
-
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            collate_fn=collate_fn_partial,
-            num_workers=6,
-            pin_memory=True,
-            persistent_workers=True,
-            prefetch_factor=2,
-            sampler=train_sampler,
-        )
-
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            collate_fn=collate_fn_partial,
-            num_workers=6,
-            pin_memory=True,
-            persistent_workers=True,
-            prefetch_factor=2,
-            sampler=val_sampler,
-        )
-
-        self._train_model(rank, world_size, train_loader, val_loader, *args)
-
-    def evaluate(self, data_loader, model_path, target_format, metrics_calculator, model_manager, args, fold):
-        save_path = os.path.join(args.save_path, args.antibiotic)
-        logger = LoggerManager(args.antibiotic, fold + 1, save_path, train=False)
-        logger.log("Evaluating on Test Set...")
-        best_epoch, best_metric, best_precision, best_recall = 0, 0, 0, 0
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        num_gpus = torch.cuda.device_count()
-        device_ids = list(range(num_gpus))
-
-        model, threshold = model_manager.load_model_threshold(model_path, device_ids=[0])
-        model.to(device)
-        model.eval()
-
-        seq_predictions = defaultdict(list)
-        seq_probabilities = defaultdict(list)
-        seq_labels = {}
-        token_importance_dict = {}
-        with torch.no_grad():
-            all_seq_ids = []
-            all_predictions = []
-            all_probabilities = []
-            all_labels = []
-            for sequence, attention_masks, labels, seq_ids in data_loader:
-                sequence, attention_masks, labels = (
-                    sequence.to(device),
-                    attention_masks.to(device),
-                    labels.to(device),
-                )
-                outputs, attention_weights = model(sequence, mask=attention_masks)
-                outputs = outputs.squeeze(1)
-                avg_attn_weights = torch.mean(
-                    torch.stack([torch.mean(attn, dim=1) for attn in attention_weights]), dim=0
-                )
-                for batch_idx in range(sequence.size(0)):
-                    if sequence[batch_idx].size(0) == 1:
-                        token = sequence[batch_idx][0].item()
-                        token_importance = avg_attn_weights[batch_idx].squeeze()
-                        token_importance_dict[token] = token_importance.item()
-                    else:
-                        token_importance = avg_attn_weights[batch_idx].sum(dim=0).squeeze()
-                        sorted_importance, indices = torch.sort(token_importance, descending=True)
-                        for idx, importance in zip(indices, sorted_importance):
-                            token = sequence[batch_idx][idx].item()
-                            if token == 0:
-                                continue
-                            if token in token_importance_dict:
-                                token_importance_dict[token] += importance.item()
-                            else:
-                                token_importance_dict[token] = importance.item()
-                probabilities = torch.sigmoid(outputs)
-                predictions = (
-                    (probabilities > threshold).long() if target_format != "multi_cat" else probabilities > 0.5
-                )
-                all_seq_ids.extend(seq_ids)
-                all_predictions.extend(predictions.cpu().numpy())
-                all_probabilities.extend(probabilities.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
-            for seq_id, prediction, label, probability in zip(
-                all_seq_ids, all_predictions, all_labels, all_probabilities
-            ):
-                seq_predictions[seq_id].append(prediction)
-                seq_probabilities[seq_id].append(probability)
-                if seq_id not in seq_labels:
-                    seq_labels[seq_id] = label
-        final_predictions = []
-        final_probabilities = []
-        for seq_id in seq_labels:
-            final_predictions.append(max(seq_predictions[seq_id], key=seq_predictions[seq_id].count))
-            final_probabilities.append(sum(seq_probabilities[seq_id]) / len(seq_probabilities[seq_id]))
-        final_labels = [seq_labels[seq_id] for seq_id in seq_labels]
-        important_tokens = sorted(token_importance_dict.items(), key=lambda x: x[1], reverse=True)
-
-        f1, accuracy, hamming, jaccard, precision, recall, auc, confusion, class_report = metrics_calculator.calculate_metrics(
-            final_labels, final_predictions, final_probabilities, target_format
-        )
-
-        metrics_calculator.print_eval_metrics(
-            logger,
-            accuracy,
-            f1,
-            best_metric,
-            best_epoch,
-            hamming,
-            jaccard,
-            precision,
-            recall,
-            best_precision,
-            best_recall,
-            auc,
-            confusion,
-            class_report,
-        )
-
-        correct = []
-        wrong = []
-        important_tokens = [(token, importance) for token, importance in important_tokens if importance > 1]
-        if target_format == "multi-cat":
-            for isolate in seq_labels:
-                if np.any(seq_labels[isolate] == 1):
-                    if not np.array_equal(seq_labels[isolate], seq_predictions[isolate]):
-                        wrong.append(isolate)
-                    else:
-                        correct.append(isolate)
-        else:
-            for isolate in seq_labels:
-                if seq_labels[isolate] == 1:
-                    if seq_labels[isolate] != seq_predictions[isolate]:
-                        wrong.append(isolate)
-                    else:
-                        correct.append(isolate)
-        if target_format != "multi-cat":
-            logger.log(f"CORRECT RESISTANT ISOLATES {correct}")
-            logger.log(f"INCORRECT RESISTANT ISOLATES {wrong}")
-        logger.log(f"IMPORTANT TOKENS {important_tokens}")
-        logger.close()
 
     def adversarial_training(self, model, loss_fn, sequence, attention_masks, labels, epsilon=1e-5):
         param_states = {}
@@ -448,26 +198,123 @@ class Trainer:
 
         return adv_loss
 
-    def _train_model(
-        self,
-        rank,
-        world_size,
-        train_loader,
-        val_loader,
-        save_path,
-        target_format,
-        fold,
-        labels_for_weighting,
-        num_epochs,
-        model_manager,
-        optimizer,
-        scheduler,
-        metrics_calculator,
-        args,
-    ):
+    def train(self, zipped_data, mode):
+        args = self.args
+        sequence_processor = self.sequence_processor
+        tokenizer_manager = self.tokenizer_manager
 
+        save_path = os.path.join(args.save_path, args.antibiotic)
+        os.makedirs(save_path, exist_ok=True)
+
+        target_format = "binary" if "multi-cat" not in args.antibiotic else "multi-cat"
+
+        if args.use_holdout:
+            labels = [label for _, label, _, _ in zipped_data]
+            if target_format != "multi-cat":
+                train_val_data, test_data = train_test_split(zipped_data, test_size=0.15, stratify=labels,
+                                                             random_state=42)
+            else:
+                train_val_data, test_data = train_test_split(zipped_data, test_size=0.15, random_state=42)
+            test_seq_ids = [seq_id for _, _, seq_id, _ in test_data]
+
+            with open(os.path.join(save_path, 'test_seq_ids.json'), 'w') as f:
+                json.dump(test_seq_ids, f, indent=3)
+        else:
+            train_val_data = zipped_data
+
+        sequences = [seq for seq, _, _, _ in train_val_data]
+        labels = [label for _, label, _, _ in train_val_data]
+        seq_ids = [seq_id for _, _, seq_id, _ in train_val_data]
+        genes_list = [genes for _, _, _, genes in train_val_data]
+
+        unique_n_mers, prepped_seqs, prepped_labels = sequence_processor.extract_and_prep_genes(sequences, labels)
+
+        if mode == "Evaluate":
+            tokenizer_path = f"{args.save_path}/{args.antibiotic}/tokenizer.json"
+            tokenizer = tokenizer_manager.load_tokenizer(tokenizer_path)
+        else:
+            tokenizer = tokenizer_manager.setup_tokenizer(unique_n_mers)
+            tokenizer_manager.save_tokenizer(tokenizer, f"{args.save_path}/{args.antibiotic}/tokenizer.json")
+
+        train_val_data = self.tokenize_sets(prepped_seqs, prepped_labels, seq_ids, genes_list, tokenizer, args, 0)
+
+        vocab_size = len(unique_n_mers) + 5
+        self.tokenizer_manager.vocab_size = len(unique_n_mers) + 5
+        batch_size = int(args.batch_size)
+        config = json.load(open(args.model_config))
+        # print(f"Vocab Size: {vocab_size}")
+        # print(train_val_data[0])
+
+        folds = self.create_folds(train_val_data, labels, target_format, n_splits=1, val_size=0.20)
+
+        for fold, (train_fold, val_fold) in enumerate(folds):
+            model_manager = ModelManager(vocab_size, config)
+            optimizer = AdamW(model_manager.model.parameters(), lr=config["learning_rate"], weight_decay=1e-3)
+            scheduler = CosineAnnealingLR(optimizer, T_max=25, eta_min=1e-8)
+            metrics_calculator = MetricsCalculator()
+
+            # Save the isolate numbers for each set for reproduction purposes
+            train_seq_ids = [seq_id for _, _, seq_id in train_fold]
+            val_seq_ids = [seq_id for _, _, seq_id in val_fold]
+            with open(os.path.join(save_path, f'train_seq_ids_fold_{fold + 1}.json'), 'w') as f:
+                json.dump(train_seq_ids, f, indent=3)
+            with open(os.path.join(save_path, f'val_seq_ids_fold_{fold + 1}.json'), 'w') as f:
+                json.dump(val_seq_ids, f, indent=3)
+
+            if "multi" not in args.antibiotic:
+                if args.oversample:
+                    oversampled_train_data = self.oversample_minority_class(train_fold)
+                    label_for_weighting = [label for _, label, _ in oversampled_train_data]
+                    train_dataset = self.create_dataset(oversampled_train_data, target_format)
+                else:
+                    label_for_weighting = [label for _, label, _ in train_fold]
+                    train_dataset = self.create_dataset(train_fold, target_format)
+                val_dataset = self.create_dataset(val_fold, target_format)
+            else:
+                label_for_weighting = []
+
+                for idx in range(len(train_fold)):
+                    sample = train_fold[idx]
+                    label = sample[1]
+                    label_for_weighting.append(label)
+
+                train_dataset = self.create_dataset(train_fold, target_format)
+                val_dataset = self.create_dataset(val_fold, target_format)
+                # print(len(train_dataset[0]["sequence"]))
+                # print(len(train_dataset[0]))
+
+            world_size = torch.cuda.device_count()
+
+            args_l = (
+                train_dataset, val_dataset, batch_size, tokenizer, save_path,
+                target_format, fold, label_for_weighting, args.num_epochs,
+                model_manager, optimizer, scheduler, metrics_calculator,
+                args, tokenizer
+            )
+
+            mp.spawn(
+                self.setup_and_run,
+                args=(world_size, *args_l),
+                nprocs=world_size,
+                join=True,
+            )
+
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        if args.use_holdout:
+            evaluater = Evaluater(args, sequence_processor, tokenizer_manager, self.gene_manager)
+            evaluater.evaluate(test_data, mode="Evaluate")
+
+
+    def _train_model(self, rank, world_size, train_loader, val_loader, save_path, target_format,
+            fold, labels_for_weighting, num_epochs, model_manager, optimizer, scheduler, metrics_calculator,
+            args, tokenizer
+    ):
+        global stop_monitor
         torch.cuda.set_device(rank)
         device = torch.device(f'cuda:{rank}')
+        device_type = "cuda" if torch.cuda.is_available() else "cpu"
 
         if rank == 0:
             print(f"Rank {rank}: Starting training", flush=True)
@@ -487,42 +334,53 @@ class Trainer:
             label_counts = Counter(labels_for_weighting)
             negative_counts = label_counts[0]
             positive_counts = label_counts[1]
+            total_counts = negative_counts + positive_counts
 
-            alpha = negative_counts / (negative_counts + positive_counts)
+            alpha = positive_counts / total_counts
+            alpha = 1 - alpha
+            alpha = np.clip(alpha, 0.0, 1.0)
             imbalance_ratio = negative_counts / positive_counts
-            if imbalance_ratio < 10:
-                gamma = 2.0  # Moderate imbalance
-            elif imbalance_ratio < 100:
-                gamma = 3.0  # High imbalance
-            else:
-                gamma = 5.0  # Severe imbalance
+            gamma = max(0, 1 + np.log10(imbalance_ratio))
 
             if rank == 0:
                 logger.log(f"alpha: {alpha}")
                 logger.log(f"gamma: {gamma}")
 
-            loss_fn = CombinedFocalLabelSmoothingLoss(alpha=alpha, gamma=gamma, reduction='mean', smoothing=0.1)
+            loss_fn = CombinedFocalLabelSmoothingLoss(alpha=alpha, gamma=gamma, reduction='mean', smoothing=0.5)
         else:
-            labels_array = np.array(labels_for_weighting)
-            positive_counts = labels_array.sum(axis=0)
-            negative_counts = (1 - labels_array).sum(axis=0)
-            epsilon = 1e-6
-            positive_weights = [
-                neg_count / (pos_count + epsilon) for neg_count, pos_count in zip(negative_counts, positive_counts)
-            ]
-            pos_weight_tensor = torch.tensor(positive_weights, device=device)
+            labels_tensor = torch.tensor(labels_for_weighting)
+            positive_counts = torch.sum(labels_tensor, dim=0)
+            negative_counts = labels_tensor.size(0) - positive_counts
+            total_counts = labels_tensor.size(0)
+
+            epsilon = 1e-7
+            positive_freq = positive_counts / (total_counts + epsilon)
+            negative_freq = negative_counts / (total_counts + epsilon)
+
+            alpha = 1 - positive_freq
+            alpha = torch.clamp(alpha, min=0.0, max=1.0)
+
+            imbalance_ratio = negative_freq / (positive_freq + epsilon)
+            gamma = torch.clamp_min(1 + torch.log10(imbalance_ratio + epsilon), min=0)
             if rank == 0:
-                logger.log(f"Positive class weights: {positive_weights}")
-            loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+                logger.log(f"alpha: {alpha}")
+                logger.log(f"gamma: {gamma}")
+            alpha = alpha.to(device)
+            gamma = gamma.to(device)
+            loss_fn = CombinedFocalLabelSmoothingLossMultiCat(alpha=alpha, gamma=gamma, reduction='mean', smoothing=0.0)
 
         best_metric = 0
         best_epoch = 0
-        best_threshold = None
 
         scaler = GradScaler()
 
         if rank == 0:
+            ordering = ["RIF", "INH", "EMB", "AMI", "KAN",
+                        "RFB", "LEV", "MXF", "ETH", "LZD",
+                        "CFZ", "DLM", "BDQ"]
+            logger.log(f"Ordering: {ordering}")
             logger.log(f"Training for {num_epochs} epochs...")
+
 
         for epoch in range(num_epochs):
             current_lr = scheduler.get_last_lr()[0]
@@ -535,72 +393,73 @@ class Trainer:
                     x.to(device) if isinstance(x, torch.Tensor) else x for x in batch
                 ]
                 optimizer.zero_grad(set_to_none=True)
-                with autocast():
+                with autocast(device_type):
                     outputs, _ = model(sequence, mask=attention_masks)
                     outputs = outputs.squeeze(1)
                     loss = loss_fn(outputs, labels.float())
 
                 scaler.scale(loss).backward()
 
-                # Adversarial training
-                adv_loss = self.adversarial_training(model, loss_fn, sequence, attention_masks, labels, epsilon=1e-4)
-                scaler.scale(adv_loss).backward()
+                if args.adversarial:
+                    adv_loss = self.adversarial_training(model, loss_fn, sequence, attention_masks, labels, epsilon=1e-2)
+                    scaler.scale(adv_loss).backward()
 
                 scaler.step(optimizer)
                 scaler.update()
 
-                total_loss += loss.item() + adv_loss.item()
+                if args.adversarial:
+                    total_loss += loss.item() + adv_loss.item()
+                else:
+                    total_loss += loss.item()
             dist.barrier()
             scheduler.step()
             average_train_loss = total_loss / len(train_loader)
+
             if rank == 0:
                 logger.log(f"Train Loss: {average_train_loss}")
 
             model.eval()
             total_eval_loss = 0
-            local_seq_ids = []
-            local_seq_probabilities = []
-            local_seq_labels = []
-            token_importance_dict = {}
-            token_counts = defaultdict(int)
+            local_seq_data = []
             with torch.no_grad():
                 for sequence, attention_masks, labels, seq_ids in val_loader:
                     sequence = sequence.to(device)
                     attention_masks = attention_masks.to(device)
                     labels = labels.to(device)
-                    with autocast():
+                    with autocast(device_type):
                         outputs, attention_weights = model(sequence, mask=attention_masks)
                         outputs = outputs.squeeze(1)
                         loss = loss_fn(outputs, labels.float())
 
                     total_eval_loss += loss.item()
                     probabilities = torch.sigmoid(outputs)
-                    local_seq_ids.extend(seq_ids)
-                    local_seq_probabilities.extend(probabilities.cpu().numpy())
-                    local_seq_labels.extend(labels.cpu().numpy())
-
-                    stacked_attention = torch.stack(attention_weights)
-                    avg_attention = stacked_attention.mean(dim=0)
-                    token_importance_scores = avg_attention.sum(dim=1)
 
                     for batch_idx in range(sequence.size(0)):
+                        seq_id = seq_ids[batch_idx]
                         token_ids = sequence[batch_idx]
-                        attn_scores = token_importance_scores[batch_idx]
-                        for token_id, score in zip(token_ids.cpu().tolist(), attn_scores.cpu().tolist()):
-                            if token_id == 0:
-                                continue  # Skip padding tokens
-                            if token_id in token_importance_dict:
-                                token_importance_dict[token_id] += score
-                                token_counts[token_id] += 1
-                            else:
-                                token_importance_dict[token_id] = score
-                                token_counts[token_id] += 1
+                        # Average attention weights across all layers and heads
+                        attn_scores = torch.stack(attention_weights).mean(dim=0)[batch_idx]
+                        attn_scores = attn_scores.sum(dim=0).cpu().tolist()  # Sum over sequence length
 
-            gathered_token_importance = [None for _ in range(world_size)]
-            dist.all_gather_object(gathered_token_importance, token_importance_dict)
+                        label = labels[batch_idx]
+                        probability = probabilities[batch_idx]
 
-            gathered_token_counts = [None for _ in range(world_size)]
-            dist.all_gather_object(gathered_token_counts, token_counts)
+                        if target_format != "multi-cat":
+                            local_seq_data.append({
+                                'seq_id': seq_id,
+                                'probability': probability.cpu().item(),
+                                'label': label.cpu().item(),
+                                'token_ids': token_ids.cpu().tolist(),
+                                'attn_scores': attn_scores
+                            })
+                        else:
+                            local_seq_data.append({
+                                'seq_id': seq_id,
+                                'probability': probability.cpu(),
+                                'label': label.cpu(),
+                                'token_ids': token_ids.cpu().tolist(),
+                                'attn_scores': attn_scores
+                            })
 
             total_eval_loss_tensor = torch.tensor([total_eval_loss], device=device)
             all_eval_loss_tensors = [torch.zeros_like(total_eval_loss_tensor) for _ in range(world_size)]
@@ -608,57 +467,20 @@ class Trainer:
             combined_eval_loss = sum([tensor.item() for tensor in all_eval_loss_tensors])
             average_eval_loss = combined_eval_loss / (len(val_loader) * world_size)
 
-            local_data = list(zip(local_seq_ids, local_seq_probabilities, local_seq_labels))
-            gathered_data = [None for _ in range(world_size)]
-            dist.all_gather_object(gathered_data, local_data)
+            gathered_seq_data = [None for _ in range(world_size)]
+            dist.all_gather_object(gathered_seq_data, local_seq_data)
 
             if rank == 0:
-                all_seq_ids = []
-                all_probabilities = []
-                all_labels = []
+                all_seq_data = []
+                for rank_data in gathered_seq_data:
+                    all_seq_data.extend(rank_data)
 
-                for rank_data in gathered_data:
-                    for seq_id, prob, label in rank_data:
-                        all_seq_ids.append(seq_id)
-                        all_probabilities.append(prob)
-                        all_labels.append(label)
 
-                combined_seq_probabilities = defaultdict(list)
-                combined_seq_labels = {}
-
-                for seq_id, prob, label in zip(all_seq_ids, all_probabilities, all_labels):
-                    combined_seq_probabilities[seq_id].append(prob)
-                    combined_seq_labels[seq_id] = label
-
-                final_probabilities = [
-                    np.mean(combined_seq_probabilities[seq_id], axis=0) for seq_id in combined_seq_labels
-                ]
-                final_labels = [combined_seq_labels[seq_id] for seq_id in combined_seq_labels]
-
-                total_token_importance = defaultdict(float)
-                total_token_counts = defaultdict(int)
-
-                for rank_importance_dict, rank_counts_dict in zip(
-                    gathered_token_importance, gathered_token_counts
-                ):
-                    for token_id, importance in rank_importance_dict.items():
-                        total_token_importance[token_id] += importance
-                    for token_id, count in rank_counts_dict.items():
-                        total_token_counts[token_id] += count
-
-                average_token_importance = {}
-                for token_id in total_token_importance:
-                    average_importance = total_token_importance[token_id] / total_token_counts[token_id]
-                    average_token_importance[token_id] = average_importance
-
-                important_tokens = sorted(
-                    average_token_importance.items(), key=lambda x: x[1], reverse=True
-                )
-                important_tokens = [(token_id, score) for token_id, score in important_tokens if score > 1]
+                final_labels = [item['label'] for item in all_seq_data]
+                final_probabilities = [item['probability'] for item in all_seq_data]
 
                 metrics_results = metrics_calculator.calculate_metrics_threshold(
                     final_labels,
-                    final_predictions=None,
                     final_probabilities=final_probabilities,
                     target_format=target_format,
                 )
@@ -692,6 +514,41 @@ class Trainer:
                     current_best_threshold,
                 )
 
+                final_probabilities = np.array(final_probabilities)  # Shape: [num_samples, num_classes]
+
+                if isinstance(current_best_threshold, (float, int)):
+                    final_predictions = (final_probabilities >= current_best_threshold).astype(int)
+                else:
+                    final_predictions = (final_probabilities >= current_best_threshold[np.newaxis, :]).astype(int)
+
+                total_token_importance = defaultdict(float)
+                total_token_counts = defaultdict(int)
+                placeholder_token_ids = set()
+                x_placeholder = tokenizer.encode("XXXXXXXXXXXXXXXXXX").ids[0]
+                y_placeholder = tokenizer.encode("YYYYYYYYYYYY").ids[0]
+                placeholder_token_ids.add(x_placeholder)
+                placeholder_token_ids.add(y_placeholder)
+                wrong_resistant = []
+
+                for idx, item in enumerate(all_seq_data):
+                    label = item['label']
+                    prediction = final_predictions[idx]
+                    token_ids = item['token_ids']
+                    attn_scores = item['attn_scores']
+                    if target_format != "multi-cat":
+                        if label == 1 and prediction == 0:
+                            wrong_resistant.append(item['seq_id'])
+                    for token_id, importance in zip(token_ids, attn_scores):
+                        if token_id in placeholder_token_ids or token_id == 0:
+                            continue
+                        total_token_importance[token_id] += importance
+                        total_token_counts[token_id] += 1
+
+                average_token_importance = {}
+                for token_id in total_token_importance:
+                    average_importance = total_token_importance[token_id] / total_token_counts[token_id]
+                    average_token_importance[token_id] = average_importance
+
                 if f1 > best_metric or epoch == 0:
                     best_metric = f1
                     best_epoch = epoch + 1
@@ -700,9 +557,113 @@ class Trainer:
                         logger.log(f"Best Threshold: {best_threshold}")
                     else:
                         logger.log(f"Best Thresholds: {best_threshold}")
-                    logger.log(f"Important Tokens: {important_tokens}")
+                    # logger.log(f"Important Tokens: {important_tokens}")
+                    with open(f"{args.save_path}/{args.antibiotic}/Gene_Token_Mapping.json", "r") as f:
+                        mappings = json.load(f)
+                        token_to_gene = mappings['token_to_gene']
+
+                    # Analyze important tokens
+                    gene_importance_sums = defaultdict(float)
+                    gene_token_counts = defaultdict(int)
+                    intergenic_importance_sums = defaultdict(float)
+                    intergenic_token_counts = defaultdict(int)
+
+                    for token_id, importance in average_token_importance.items():
+                        token_id = str(token_id)
+                        if token_id in token_to_gene:
+                            info = token_to_gene[token_id]
+                            gene_name = info['gene']
+                            if info['is_intergenic']:
+                                intergenic_importance_sums[gene_name] += importance
+                                intergenic_token_counts[gene_name] += 1
+                            else:
+                                gene_importance_sums[gene_name] += importance
+                                gene_token_counts[gene_name] += 1
+
+                    # Compute average importance per gene
+                    gene_importance = {}
+                    for gene_name in gene_importance_sums:
+                        gene_importance[gene_name] = gene_importance_sums[gene_name] / gene_token_counts[gene_name]
+
+                    # Compute average importance per intergenic region
+                    intergenic_importance = {}
+                    for region_name in intergenic_importance_sums:
+                        intergenic_importance[region_name] = intergenic_importance_sums[region_name] / \
+                                                             intergenic_token_counts[region_name]
+
+                    def normalize_importance(importance_dict):
+                        values = np.array(list(importance_dict.values()))
+                        mean = np.mean(values)
+                        std = np.std(values)
+                        return {
+                            key: (value - mean) / std
+                            for key, value in importance_dict.items()
+                        }
+
+                    # Calculate statistical significance
+                    gene_scores = np.array(list(gene_importance.values()))
+                    gene_mean = np.mean(gene_scores)
+                    gene_std = np.std(gene_scores, ddof=1)  # Use ddof=1 for sample standard deviation
+
+                    z_scores_genes = {
+                        gene: (score - gene_mean) / gene_std
+                        for gene, score in gene_importance.items()
+                    }
+
+                    # Identify significantly important genes (z-score > 1.96)
+                    significant_genes = {
+                        gene: z for gene, z in z_scores_genes.items() if z > 1.96
+                    }
+
+                    # Compute z-scores for intergenic importance
+                    intergenic_scores = np.array(list(intergenic_importance.values()))
+                    intergenic_mean = np.mean(intergenic_scores)
+                    intergenic_std = np.std(intergenic_scores, ddof=1)
+
+                    z_scores_intergenic = {
+                        region: (score - intergenic_mean) / intergenic_std
+                        for region, score in intergenic_importance.items()
+                    }
+
+                    # Identify significantly important intergenic regions (z-score > 1.96)
+                    significant_intergenic = {
+                        region: z for region, z in z_scores_intergenic.items() if z > 1.96
+                    }
+
+                    # Sort the significant genes and intergenic regions by z-score in descending order
+                    sorted_significant_genes = sorted(significant_genes.items(), key=lambda x: x[1], reverse=True)
+                    sorted_significant_intergenic = sorted(significant_intergenic.items(), key=lambda x: x[1],
+                                                           reverse=True)
+
+                    # Log statistically significant genes
+                    if sorted_significant_genes:
+                        logger.log("\nStatistically significant genes (z-score > 2):")
+                        for gene, z in sorted_significant_genes:
+                            logger.log(f"{gene}: z-score = {z:.4f}")
+                    else:
+                        logger.log("\nNo statistically significant genes found (z-score > 2).")
+
+                    # Log statistically significant intergenic regions
+                    if sorted_significant_intergenic:
+                        logger.log("\nStatistically significant intergenic regions (z-score > 2):")
+                        for region, z in sorted_significant_intergenic:
+                            logger.log(f"{region}: z-score = {z:.4f}")
+
+                    # Save most important genes to a file
+                    genes_file_path = os.path.join(save_path, f'important_genes_fold_{fold + 1}.json')
+                    with open(genes_file_path, 'w') as f:
+                        json.dump(gene_importance, f, indent=4)
+
+                    # Save most important intergenic regions to a file
+                    intergenic_file_path = os.path.join(save_path, f'important_intergenic_regions_fold_{fold + 1}.json')
+                    with open(intergenic_file_path, 'w') as f:
+                        json.dump(intergenic_importance, f, indent=4)
+
+                    # logger.log(f"Important Tokens: {important_tokens}")
                     model_save_path = os.path.join(save_path, f"best_model_fold_{fold + 1}.pth")
-                    model_manager.save_model_threshold(model_save_path, best_threshold, logger)
-        if rank == 0:
-            logger.log(f"Training Finished")
+                    model_manager.save_model(model_save_path, best_threshold, logger)
+                    logger.log(f"Wrong Resistant Isolates: {wrong_resistant}")
+            if rank == 0:
+                logger.log(f"Training Finished")
+
         dist.destroy_process_group()
