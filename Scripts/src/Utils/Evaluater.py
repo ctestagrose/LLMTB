@@ -64,7 +64,7 @@ class Evaluater:
                 seq_ids.append(seq_id)
         return SeqDataset(seqs_, labs, seq_ids, classification_type)
 
-    def evaluate(self, zipped_data, mode):
+    def evaluate(self, zipped_data, mode, fold):
         args = self.args
         sequence_processor = self.sequence_processor
         tokenizer_manager = self.tokenizer_manager
@@ -98,72 +98,74 @@ class Evaluater:
             pin_memory=True,
         )
 
-        for fold in range(5):
-            model_path = os.path.join(save_path, f"best_model_fold_{fold + 1}.pth")
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            config = json.load(open(args.model_config))
-            vocab_size = len(tokenizer.get_vocab())
-            model_manager = ModelManager(vocab_size=vocab_size, config=config)
-            model, threshold = model_manager.load_model(model_path, device_ids=[0])
-            best_epoch, best_metric, best_precision, best_recall = 0, 0, 0, 0
-            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-            num_gpus = torch.cuda.device_count()
-            device_ids = list(range(num_gpus))
+        model_path = os.path.join(save_path, f"best_model_fold_{fold + 1}.pth")
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+        config = json.load(open(args.model_config))
+        vocab_size = len(tokenizer.get_vocab())
+        model_manager = ModelManager(vocab_size=vocab_size, config=config)
+        model, threshold = model_manager.load_model(model_path, device=device)
+        best_epoch, best_metric, best_precision, best_recall = 0, 0, 0, 0
+        num_gpus = torch.cuda.device_count()
 
-            logger = LoggerManager(args.antibiotic, fold + 1, save_path, train=False)
-            logger.log("Evaluating on Test Set...")
+        logger = LoggerManager(args.antibiotic, fold + 1, save_path, train=False)
+        logger.log("Evaluating on Test Set...")
 
-            model.eval()
-            all_predictions = []
-            all_probabilities = []
-            all_labels = []
+        model.eval()
+        all_predictions = []
+        all_probabilities = []
+        all_labels = []
 
-            with torch.no_grad():
-                for sequence, attention_masks, labels, seq_ids in test_loader:
-                    sequence, attention_masks, labels = (
-                        sequence.to(device),
-                        attention_masks.to(device),
-                        labels.to(device),
-                    )
-                    outputs, _ = model(sequence, mask=attention_masks)
-                    outputs = outputs.squeeze(1)
-                    probabilities = torch.sigmoid(outputs)
-                    probabilities = np.array(probabilities.cpu())
-                    if isinstance(threshold, (float, int)):
-                        predictions = (probabilities >= threshold).astype(int)
-                    else:
-                        predictions = (probabilities >= threshold[np.newaxis, :]).astype(int)
-                    all_predictions.extend(predictions)
-                    all_probabilities.extend(probabilities)
-                    all_labels.extend(labels.cpu().numpy())
+        with torch.no_grad():
+            for sequence, attention_masks, labels, seq_ids in test_loader:
+                sequence, attention_masks, labels = (
+                    sequence.to(device),
+                    attention_masks.to(device),
+                    labels.to(device),
+                )
+                outputs, _ = model(sequence, mask=attention_masks)
+                outputs = outputs.squeeze(1)
+                probabilities = torch.sigmoid(outputs)
+                probabilities = np.array(probabilities.cpu())
+                if isinstance(threshold, (float, int)):
+                    predictions = (probabilities >= threshold).astype(int)
+                else:
+                    predictions = (probabilities >= threshold[np.newaxis, :]).astype(int)
+                all_predictions.extend(predictions)
+                all_probabilities.extend(probabilities)
+                all_labels.extend(labels.cpu().numpy())
 
-            mem_allocated = torch.cuda.memory_allocated(device) / (1024 ** 2)
-            mem_reserved = torch.cuda.memory_reserved(device) / (1024 ** 2)
-            peak_mem_allocated = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
-            peak_mem_reserved = torch.cuda.max_memory_reserved(device) / (1024 ** 2)
+        mem_allocated = torch.cuda.memory_allocated(device) / (1024 ** 2)
+        mem_reserved = torch.cuda.memory_reserved(device) / (1024 ** 2)
+        peak_mem_allocated = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+        peak_mem_reserved = torch.cuda.max_memory_reserved(device) / (1024 ** 2)
 
-            logger.log(f"GPU Memory Allocated: {mem_allocated:.2f} MB")
-            logger.log(f"GPU Memory Reserved: {mem_reserved:.2f} MB")
-            logger.log(f"Peak GPU Memory Allocated: {peak_mem_allocated:.2f} MB")
-            logger.log(f"Peak GPU Memory Reserved: {peak_mem_reserved:.2f} MB")
+        logger.log(f"GPU Memory Allocated: {mem_allocated:.2f} MB")
+        logger.log(f"GPU Memory Reserved: {mem_reserved:.2f} MB")
+        logger.log(f"Peak GPU Memory Allocated: {peak_mem_allocated:.2f} MB")
+        logger.log(f"Peak GPU Memory Reserved: {peak_mem_reserved:.2f} MB")
 
-            f1, accuracy, hamming, jaccard, precision, recall, auc, confusion, class_report = metrics_calculator.calculate_metrics(
-                all_labels, all_predictions, all_probabilities, target_format
-            )
+        f1, accuracy, hamming, jaccard, precision, recall, auc, confusion, class_report = metrics_calculator.calculate_metrics(
+            all_labels, all_predictions, all_probabilities, target_format
+        )
 
-            metrics_calculator.print_eval_metrics(
-                logger,
-                accuracy,
-                f1,
-                best_metric,
-                best_epoch,
-                hamming,
-                jaccard,
-                precision,
-                recall,
-                best_precision,
-                best_recall,
-                auc,
-                confusion,
-                class_report,
-            )
+        metrics_calculator.print_eval_metrics(
+            logger,
+            accuracy,
+            f1,
+            best_metric,
+            best_epoch,
+            hamming,
+            jaccard,
+            precision,
+            recall,
+            best_precision,
+            best_recall,
+            auc,
+            confusion,
+            class_report,
+        )

@@ -21,6 +21,7 @@ from torch.utils.data import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.amp import autocast, GradScaler
 from sklearn.model_selection import ShuffleSplit, StratifiedShuffleSplit, train_test_split
+from tqdm import tqdm
 
 
 class Trainer:
@@ -30,35 +31,57 @@ class Trainer:
         self.tokenizer_manager = tokenizer_manager
         self.gene_manager = gene_manager
 
-    def setup_and_run(self, rank, world_size, train_dataset, val_dataset, batch_size, tokenizer, *args):
-        master_addr = os.environ.get('MASTER_ADDR', '127.0.0.1')
-        master_port = os.environ.get('MASTER_PORT', '8989')
+    def _get_device(self, rank: int = 0):
+        if torch.cuda.is_available():
+            torch.cuda.set_device(rank)
+            return torch.device(f"cuda:{rank}")
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
 
-        os.environ['MASTER_ADDR'] = master_addr
-        os.environ['MASTER_PORT'] = master_port
+    def setup_and_run(self, rank, world_size, train_dataset, val_dataset,
+                      batch_size, tokenizer, distributed, *args):
+        if distributed:
+            master_addr = os.environ.get('MASTER_ADDR', '127.0.0.1')
+            master_port = os.environ.get('MASTER_PORT', '8989')
+            os.environ['MASTER_ADDR'] = master_addr
+            os.environ['MASTER_PORT'] = master_port
 
-        if not dist.is_initialized():
-            dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
+            if not dist.is_initialized():
+                dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
 
-        torch.cuda.set_device(rank)
+        device = self._get_device(rank)
 
-        train_sampler = DistributedSampler(train_dataset, rank=rank, num_replicas=world_size, shuffle=True)
-        val_sampler = DistributedSampler(val_dataset, rank=rank, num_replicas=world_size, shuffle=False)
+        if distributed:
+            train_sampler = DistributedSampler(train_dataset, rank=rank,
+                                               num_replicas=world_size, shuffle=True)
+            val_sampler = DistributedSampler(val_dataset, rank=rank,
+                                             num_replicas=world_size, shuffle=False)
+            shuffle_train = False
+            shuffle_val = False
+        else:
+            train_sampler = None
+            val_sampler = None
+            shuffle_train = True
+            shuffle_val = False
 
-        collate_fn_partial = partial(collate_fn, classification_type=args[3],
-                                     MASK_TOKEN=tokenizer.token_to_id("[MASK]"),
-                                     PAD_TOKEN=tokenizer.token_to_id("[PAD]"),
-                                     VOCAB_SIZE=self.tokenizer_manager.vocab_size)
+        collate_fn_partial = partial(
+            collate_fn,
+            classification_type=args[3],
+            MASK_TOKEN=tokenizer.token_to_id("[MASK]"),
+            PAD_TOKEN=tokenizer.token_to_id("[PAD]"),
+            VOCAB_SIZE=self.tokenizer_manager.vocab_size,
+        )
 
         num_cpus = torch.get_num_threads()
 
         train_loader = DataLoader(
             train_dataset,
             batch_size=batch_size,
-            shuffle=False,
+            shuffle=shuffle_train,
             collate_fn=collate_fn_partial,
             num_workers=num_cpus,
-            pin_memory=True,
+            pin_memory=torch.cuda.is_available(),
             persistent_workers=True,
             prefetch_factor=2,
             sampler=train_sampler,
@@ -67,13 +90,20 @@ class Trainer:
         val_loader = DataLoader(
             val_dataset,
             batch_size=batch_size,
-            shuffle=False,
+            shuffle=shuffle_val,
             collate_fn=collate_fn_partial,
             num_workers=num_cpus,
-            pin_memory=True,
+            pin_memory=torch.cuda.is_available(),
             persistent_workers=True,
             prefetch_factor=2,
             sampler=val_sampler,
+        )
+
+        self._train_model(
+            rank, world_size, train_loader, val_loader,
+            *args,
+            distributed=distributed,
+            device=device,
         )
 
         self._train_model(rank, world_size, train_loader, val_loader, *args)
@@ -81,7 +111,7 @@ class Trainer:
     def tokenize_sets(self, prepped_seqs, prepped_labels, seq_ids, genes_list, tokenizer, args, fold):
         encoded_sequences = []
         gene_mapping = {}
-        token_to_gene = {}  # Add reverse mapping
+        token_to_gene = {}
 
         for index, sequence in enumerate(prepped_seqs):
             encoded_sequence = self.tokenizer_manager.encode_sequences_genes(sequence, tokenizer)
@@ -242,8 +272,6 @@ class Trainer:
         self.tokenizer_manager.vocab_size = len(unique_n_mers) + 5
         batch_size = int(args.batch_size)
         config = json.load(open(args.model_config))
-        # print(f"Vocab Size: {vocab_size}")
-        # print(train_val_data[0])
 
         folds = self.create_folds(train_val_data, labels, target_format, n_splits=1, val_size=0.20)
 
@@ -283,7 +311,12 @@ class Trainer:
                 # print(len(train_dataset[0]["sequence"]))
                 # print(len(train_dataset[0]))
 
-            world_size = torch.cuda.device_count()
+            num_gpus = torch.cuda.device_count()
+            use_distributed = (
+                args.distributed
+                and torch.cuda.is_available()
+                and num_gpus > 1
+            )
 
             args_l = (
                 train_dataset, val_dataset, batch_size, tokenizer, save_path,
@@ -292,38 +325,94 @@ class Trainer:
                 args, tokenizer
             )
 
-            mp.spawn(
-                self.setup_and_run,
-                args=(world_size, *args_l),
-                nprocs=world_size,
-                join=True,
-            )
+            if use_distributed:
+                world_size = num_gpus
+                mp.spawn(
+                    self.setup_and_run,
+                    args=(world_size, *args_l, True),
+                    nprocs=world_size,
+                    join=True,
+                )
+            else:
+                rank = 0
+                world_size = 1
+                device = self._get_device(rank)
+
+                collate_fn_partial = partial(
+                    collate_fn,
+                    classification_type=target_format,
+                    MASK_TOKEN=tokenizer.token_to_id("[MASK]"),
+                    PAD_TOKEN=tokenizer.token_to_id("[PAD]"),
+                    VOCAB_SIZE=self.tokenizer_manager.vocab_size,
+                )
+                num_cpus = torch.get_num_threads()
+
+                train_loader = DataLoader(
+                    train_dataset,
+                    batch_size=batch_size,
+                    shuffle=True,
+                    collate_fn=collate_fn_partial,
+                    num_workers=num_cpus,
+                    pin_memory=torch.cuda.is_available(),
+                    persistent_workers=True,
+                    prefetch_factor=2,
+                )
+                val_loader = DataLoader(
+                    val_dataset,
+                    batch_size=batch_size,
+                    shuffle=False,
+                    collate_fn=collate_fn_partial,
+                    num_workers=num_cpus,
+                    pin_memory=torch.cuda.is_available(),
+                    persistent_workers=True,
+                    prefetch_factor=2,
+                )
+
+                self._train_model(
+                    rank, world_size,
+                    train_loader, val_loader,
+                    save_path, target_format,
+                    fold, label_for_weighting, args.num_epochs,
+                    model_manager, optimizer, scheduler, metrics_calculator,
+                    args, tokenizer,
+                    distributed=False,
+                    device=device,
+                )
 
             gc.collect()
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         if args.use_holdout:
             evaluater = Evaluater(args, sequence_processor, tokenizer_manager, self.gene_manager)
-            evaluater.evaluate(test_data, mode="Evaluate")
+            evaluater.evaluate(test_data, mode="Evaluate", fold=fold)
 
 
-    def _train_model(self, rank, world_size, train_loader, val_loader, save_path, target_format,
-            fold, labels_for_weighting, num_epochs, model_manager, optimizer, scheduler, metrics_calculator,
-            args, tokenizer
+    def _train_model(
+        self, rank, world_size, train_loader, val_loader, save_path, target_format,
+        fold, labels_for_weighting, num_epochs, model_manager, optimizer, scheduler,
+        metrics_calculator, args, tokenizer,
+        distributed: bool = False,
+        device: torch.device | None = None,
     ):
         global stop_monitor
-        torch.cuda.set_device(rank)
-        device = torch.device(f'cuda:{rank}')
-        device_type = "cuda" if torch.cuda.is_available() else "cpu"
+        if device is None:
+            device = self._get_device(rank)
+        device_type = "cuda" if device.type == "cuda" else (
+            "mps" if device.type == "mps" else "cpu"
+        )
 
         if rank == 0:
-            print(f"Rank {rank}: Starting training", flush=True)
+            print(f"Rank {rank}: Starting training on {device}", flush=True)
 
         model = model_manager.model.to(device)
-        model = DDP(model, device_ids=[rank])
+        if distributed:
+            model = DDP(model, device_ids=[rank] if device.type == "cuda" else None)
 
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+
+        if device_type == "cuda":
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
 
         if rank == 0:
             logger = LoggerManager(args.antibiotic, fold + 1, save_path, train=True)
@@ -382,7 +471,7 @@ class Trainer:
             logger.log(f"Training for {num_epochs} epochs...")
 
 
-        for epoch in range(num_epochs):
+        for epoch in tqdm(range(num_epochs), desc="Training Epochs"):
             current_lr = scheduler.get_last_lr()[0]
             if rank == 0:
                 logger.log(f"{'-' * 20}\nEpoch {epoch + 1}, Learning Rate: {current_lr}")
@@ -400,18 +489,19 @@ class Trainer:
 
                 scaler.scale(loss).backward()
 
-                if args.adversarial:
+                if args.adversarial_training:
                     adv_loss = self.adversarial_training(model, loss_fn, sequence, attention_masks, labels, epsilon=1e-2)
                     scaler.scale(adv_loss).backward()
 
                 scaler.step(optimizer)
                 scaler.update()
 
-                if args.adversarial:
+                if args.adversarial_training:
                     total_loss += loss.item() + adv_loss.item()
                 else:
                     total_loss += loss.item()
-            dist.barrier()
+            if distributed:
+                dist.barrier()
             scheduler.step()
             average_train_loss = total_loss / len(train_loader)
 
@@ -461,20 +551,30 @@ class Trainer:
                                 'attn_scores': attn_scores
                             })
 
-            total_eval_loss_tensor = torch.tensor([total_eval_loss], device=device)
-            all_eval_loss_tensors = [torch.zeros_like(total_eval_loss_tensor) for _ in range(world_size)]
-            dist.all_gather(all_eval_loss_tensors, total_eval_loss_tensor)
-            combined_eval_loss = sum([tensor.item() for tensor in all_eval_loss_tensors])
-            average_eval_loss = combined_eval_loss / (len(val_loader) * world_size)
+            if distributed:
+                total_eval_loss_tensor = torch.tensor([total_eval_loss], device=device)
+                all_eval_loss_tensors = [torch.zeros_like(total_eval_loss_tensor) for _ in range(world_size)]
+                dist.all_gather(all_eval_loss_tensors, total_eval_loss_tensor)
+                combined_eval_loss = sum([tensor.item() for tensor in all_eval_loss_tensors])
+                average_eval_loss = combined_eval_loss / (len(val_loader) * world_size)
 
-            gathered_seq_data = [None for _ in range(world_size)]
-            dist.all_gather_object(gathered_seq_data, local_seq_data)
+                gathered_seq_data = [None for _ in range(world_size)]
+                dist.all_gather_object(gathered_seq_data, local_seq_data)
+
+                if rank == 0:
+                    all_seq_data = []
+                    for rank_data in gathered_seq_data:
+                        all_seq_data.extend(rank_data)
+            else:
+                average_eval_loss = total_eval_loss / len(val_loader)
 
             if rank == 0:
-                all_seq_data = []
-                for rank_data in gathered_seq_data:
-                    all_seq_data.extend(rank_data)
-
+                if distributed:
+                    all_seq_data = []
+                    for rank_data in gathered_seq_data:
+                        all_seq_data.extend(rank_data)
+                else:
+                    all_seq_data = local_seq_data
 
                 final_labels = [item['label'] for item in all_seq_data]
                 final_probabilities = [item['probability'] for item in all_seq_data]
@@ -666,4 +766,5 @@ class Trainer:
             if rank == 0:
                 logger.log(f"Training Finished")
 
-        dist.destroy_process_group()
+        if distributed:
+            dist.destroy_process_group()
