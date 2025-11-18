@@ -45,6 +45,12 @@ LLMTB/
 git clone https://github.com/<your-user>/LLMTB.git
 cd LLMTB
 ```
+### Install Dependencies
+```
+mamba create -n llmtb_env python=3.11.13
+mamba activate llmtb_env
+pip install -r requirements.txt
+```
 ### Configuring a Training Run
 Modify ```train_config.json```. Example:
 ```
