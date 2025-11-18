@@ -140,3 +140,64 @@ Model and threshold saved to /Users/conrad/LLMTB-main/Trained_Models/AMI/best_mo
 Wrong Resistant Isolates: []
 Training Finished
 ```
+
+## Evaluation
+Code is provided to load models and test. Adjust the Evaluation Config:
+
+```
+{
+    "sequence_dir": "/LLMTB/Data/IR_Variable_Isolates_Eval",
+    "gene_file": "/LLMTB/Scripts/Config/Gene_Configs/genes.json",
+    "target_file": "/LLMTB/Data/cryptic_targets_all.json",
+    "use_holdout": false,
+    "use_gene_file": true,
+    "model_config": "/LLMTB/Scripts/Config/Model_Configs/Base_BERT/base_config_binary.json",
+    "antibiotic": "AMI",
+    "save_path": "/LLMTB/Trained_Models",
+    "fold": 0
+}
+```
+Run evaluation using:
+```
+python evaluate_model.py
+```
+Output is saved in location where the model was previously saved. 
+
+### Running on Custom Dataset
+We are currently adapting the code to work on datasets outside of the CRyPTIC dataset used in the study. 
+This current version of the code has not been validated on datasets outside of CRyPTIC but should work in cases where:
+1. Target File has same structure of isolate number and antibiotic.
+```
+{
+    "ERR4810489": {
+        "AMI": 0.0,
+        "BDQ": NaN,
+        "CFZ": 0.0,
+        "DLM": 0.0,
+        "EMB": 0.0,
+        "ETH": 0.0,
+        "INH": 0.0,
+        "KAN": 0.0,
+        "LEV": 0.0,
+        "LZD": 0.0,
+        "MXF": 0.0,
+        "RIF": 0.0,
+        "RFB": 0.0
+    },
+    ...
+}  
+```
+2. Fasta files follow a similar naming scheme:
+```
+IsolateNum_SuffixText.fasta
+```
+3. Fasta file headers are setup as such:
+```
+>unique_169|GJGLMLCD_03391||tuberculosis|ERR2510875|FROM:52-731|NODE_45_length_35900_cov_21.074292|IR:0-52|BEFORE|STRAND:+
+...
+>unique_169|GJGLMLCD_03391||tuberculosis H37Rv|CDS|Rv1765c|1997418-1998515|-|Rv1765c|downstream:0|upstream:0
+...
+>unique_169|GJGLMLCD_03391||tuberculosis|ERR2510875|FROM:52-731|NODE_45_length_35900_cov_21.074292|IR:731-1081|AFTER|STRAND:+
+...
+```
+BEFORE or AFTER are contained in the intergenic headers while the gene name is the 3rd to last in the header for the gene seqeunce.

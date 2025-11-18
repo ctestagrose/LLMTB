@@ -73,12 +73,6 @@ if __name__ == '__main__':
         antibiotics = ["AMI", "INH", "RIF", "LEV", "ETH", "EMB", "RFB", "MXF", "KAN", "LZD", "BDQ", "DLM", "CFZ"]
     elif args.antibiotic.lower() == "rare" or args.antibiotic.lower() == "rare_genes_drugs":
         antibiotics = ["LZD", "BDQ", "DLM", "CFZ"]
-    elif args.antibiotic.lower() == "multi-cat":
-        antibiotics = ["multi-cat"]
-    elif args.antibiotic.lower() == "multi-cat rare":
-        antibiotics = ["multi-cat rare"]
-    elif args.antibiotic.lower() == "multi-cat all":
-        antibiotics = ["multi-cat all"]
     else:
         antibiotics = [args.antibiotic]
 

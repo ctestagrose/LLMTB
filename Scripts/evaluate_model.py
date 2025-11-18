@@ -21,27 +21,25 @@ def parse_arguments():
     parser.add_argument('--sequence_dir', type=str, required=True, help='Path to the directory of Fasta Files.')
     parser.add_argument('--num_epochs', type=int, default=10, help='Number of epochs for training.')
     parser.add_argument('--batch_size', type=int, default=4, help='Batch size for training')
-    parser.add_argument('--stride', type=int, default=1, help='Stride for Kmer creation')
-    parser.add_argument('--Kmer_Size', type=int, default=31, help='The size of the Kmers (31-default)')
+    parser.add_argument('--stride', type=int, default=20000, help='Stride for tokenization')
+    parser.add_argument('--Kmer_Size', type=int, default=20000, help='The size of the Kmers (20000-default for whole gene)')
     parser.add_argument('--model_config', type=str, required=True, help='Path to Model configuration')
     parser.add_argument('--antibiotic', type=str, required=True,
                         help='All, Rare only, or provide one antibiotic abbrev.')
     parser.add_argument('--save_path', type=str, required=True, help='Where to save model?')
     parser.add_argument('--use_holdout', action='store_true', help='Use a hold out test set?')
-    parser.add_argument('--use_gen', action='store_true', help='Use generated data (default: False)')
-    parser.add_argument('--no_gen', dest='use_gen', action='store_false', help='Do not use generated data')
     parser.add_argument('--gene_file', type=str, required=True, help='Path to the genes JSON file.')
     parser.add_argument('--target_file', type=str, required=True, help='Path to the targets file.')
-    parser.add_argument('--generated_file_path', type=str, required=True, help='Path to the generated files.')
+    parser.add_argument('--fold', type=int, required=True, help='Fold to Evaluate '
+                                                                '- Number from 0 (fold 1) to 4 (fold 5) or "All" '
+                                                                'for folds 1-5)')
+
 
     # Convert the file_args dictionary into "command-line" arguments
     argument_list = []
     for key, value in file_args.items():
         if isinstance(value, bool):
-            if key == "use_gen":
-                if value:
-                    argument_list.append(f'--{key}')
-            elif key == "use_holdout" and value:
+            if key == "use_holdout" and value:
                 argument_list.append(f'--{key}')
         else:
             argument_list.append(f'--{key}')
@@ -63,14 +61,6 @@ if __name__ == '__main__':
         antibiotics = ["AMI", "INH", "RIF", "LEV", "ETH", "EMB", "RFB", "MXF", "KAN", "LZD", "BDQ", "DLM", "CFZ"]
     elif args.antibiotic == "Rare" or args.antibiotic == "Rare_genes_drugs":
         antibiotics = ["LZD", "BDQ", "DLM", "CFZ"]
-    elif args.antibiotic == "Multi-Cat":
-        antibiotics = ["multi-cat"]
-    elif args.antibiotic == "Multi-Cat Rare":
-        antibiotics = ["multi-cat rare"]
-    elif args.antibiotic == "Multi-Cat All":
-        antibiotics = ["multi-cat all"]
-    elif args.antibiotic == "Eval Test":
-        antibiotics = ["AMI", "INH", "RIF"]
     else:
         antibiotics = [args.antibiotic]
 
@@ -84,17 +74,6 @@ if __name__ == '__main__':
 
         # Glob the fasta files for specific antibiotic
         fasta_files = glob.glob(os.path.join(args.sequence_dir, '**', '*.fasta'), recursive=True)
-        if "Merged" not in args.sequence_dir:
-            fasta_files = [f for f in fasta_files if antibiotic in os.path.basename(f)]
-
-        # Determine if generated files should be used and include/exclude them
-        if args.use_gen == True:
-            generated_files = os.listdir(
-                f"{args.generated_file_path}/{antibiotic}")
-            random.Random(17).shuffle(generated_files)
-            # generated_files = generated_files[:200]
-        else:
-            generated_files = []
 
         # Random shuffle
         random.Random(17).shuffle(fasta_files)
@@ -102,15 +81,14 @@ if __name__ == '__main__':
 
         # Initialize gene_manager, sequence_processor, tokenizer_manager, and data_prep
         gene_manager = GeneManager(args.gene_file)
-        sequence_processor = SequenceProcessor(args.Kmer_Size, args.stride)
-        tokenizer_manager = TokenizerManager(args.Kmer_Size)
+        sequence_processor = SequenceProcessor()
+        tokenizer_manager = TokenizerManager()
 
-        # tokenizer_manager = TokenizerManager(vocab_size=30000)
 
         data_preparer = DataPreparer(gene_manager, sequence_processor, tokenizer_manager, args)
 
         # Use the data preparer to prepare the data for training
-        zipped_data, full_set_seqs = data_preparer.prep_data(
+        zipped_data = data_preparer.prep_data(
             fasta_files=fasta_files,
             target_file=args.target_file,
             target_format=args.antibiotic,
@@ -118,4 +96,4 @@ if __name__ == '__main__':
         )
 
         evaluater = Evaluater(args, sequence_processor, tokenizer_manager, gene_manager)
-        evaluater.evaluate(zipped_data, mode="Evaluate")
+        evaluater.evaluate(zipped_data, mode="Evaluate", fold=args.fold)

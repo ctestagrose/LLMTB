@@ -1,14 +1,11 @@
 {
-    "sequence_dir": "/path/to/fasta/sequences",
-    "gene_file": "/path/to/gene/config/file",
-    "target_file": "/path/to/labels/json",
-    "num_epochs": 200,
-    "batch_size": 256,
-    "stride": 20000,
-    "Kmer_Size": 20000,
+    "sequence_dir": "/LLMTB/Data/IR_Variable_Isolates_Test",
+    "gene_file": "/LLMTB/Scripts/Config/Gene_Configs/genes.json",
+    "target_file": "/LLMTB/Data/cryptic_targets_all.json",
     "use_holdout": false,
     "use_gene_file": true,
-    "model_config": "/path/to/model/config/file",
-    "antibiotic": "All",
-    "save_path": "/location/to/save/model/files"
+    "model_config": "/LLMTB/Scripts/Config/Model_Configs/Base_BERT/base_config_binary.json",
+    "antibiotic": "AMI",
+    "save_path": "/LLMTB/Trained_Models",
+    "fold": 0
 }

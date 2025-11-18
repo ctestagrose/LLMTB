@@ -1,15 +1,15 @@
 {
-    "sequence_dir": "/LLMTB-main/Data/IR_Variable_Isolates_Train",
-    "gene_file": "LLMTB-main/Scripts/Config/Gene_Configs/genes.json",
-    "target_file": "/LLMTB-main/Data/cryptic_targets_all.json",
+    "sequence_dir": "/LLMTB/Data/IR_Variable_Isolates_Train",
+    "gene_file": "/LLMTB/Scripts/Config/Gene_Configs/genes.json",
+    "target_file": "/LLMTB/Data/cryptic_targets_all.json",
     "num_epochs": 1,
     "batch_size": 64,
     "use_holdout": true,
     "use_gene_file": true,
-    "model_config": "/LLMTB-main/Scripts/Config/Model_Configs/Base_BERT/base_config_binary.json",
+    "model_config": "/LLMTB/Scripts/Config/Model_Configs/Base_BERT/base_config_binary.json",
     "antibiotic": "AMI",
     "oversample": false,
     "adversarial_training": true,
     "distributed": false,
-    "save_path": "/LLMTB-main/Trained_Models"
+    "save_path": "/LLMTB/Trained_Models"
 }
