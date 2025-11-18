@@ -166,7 +166,7 @@ Output is saved in location where the model was previously saved.
 ### Running on Custom Dataset
 We are currently adapting the code to work on datasets outside of the CRyPTIC dataset used in the study. 
 This current version of the code has not been validated on datasets outside of CRyPTIC but should work in cases where:
-1. Target File has same structure of isolate number and antibiotic.
+1. Target File structure of isolate number and antibiotic.
 ```
 {
     "ERR4810489": {
