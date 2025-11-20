@@ -7,7 +7,7 @@
     "use_holdout": true,
     "use_gene_file": true,
     "model_config": "/LLMTB/Scripts/Config/Model_Configs/Base_BERT/base_config_binary.json",
-    "antibiotic": "AMI",
+    "antibiotic": "All",
     "oversample": false,
     "adversarial_training": true,
     "distributed": false,
